@@ -11,6 +11,9 @@ logistics-ops-dashboard-py/
   data/                  Raw and processed CSV files
   notebooks/             Plotly visualisation notebook
   reports/               Generated Markdown reports
+  public/                Vercel static site output
+  scripts/
+    build_static_site.py Static dashboard build script for Vercel
   src/
     generate_data.py     Synthetic dataset generator
     pipeline.py          Cleaning and transformation pipeline
@@ -68,3 +71,28 @@ pytest
 ```
 
 The tests cover KPI return types and ranges, pipeline cleaning behavior, and derived columns.
+
+## Deploy To Vercel
+
+This project deploys to Vercel as a static dashboard generated from `data/clean_shipments.csv`.
+
+Before deploying, make sure the cleaned data exists:
+
+```bash
+python src/generate_data.py
+python src/pipeline.py
+```
+
+Build the static site locally:
+
+```bash
+python scripts/build_static_site.py
+```
+
+The build writes `public/index.html` and `public/dashboard-data.json`. Vercel uses `vercel.json` to run the same build command and serve the `public` directory.
+
+Recommended Vercel settings:
+
+- Framework Preset: `Other`
+- Build Command: `python scripts/build_static_site.py`
+- Output Directory: `public`

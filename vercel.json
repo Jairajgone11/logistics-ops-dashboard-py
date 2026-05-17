@@ -1,5 +1,5 @@
 {
   "framework": null,
-  "buildCommand": null,
+  "buildCommand": "python scripts/build_static_site.py",
   "outputDirectory": "public"
 }

@@ -1,4 +1,128 @@
-<!doctype html>
+"""Build a static Vercel dashboard from the cleaned shipment CSV."""
+
+from __future__ import annotations
+
+import csv
+import json
+from collections import Counter, defaultdict
+from datetime import datetime
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CLEAN_DATA_PATH = PROJECT_ROOT / "data" / "clean_shipments.csv"
+PUBLIC_DIR = PROJECT_ROOT / "public"
+
+
+def _parse_bool(value: str) -> bool:
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def _read_records() -> list[dict[str, object]]:
+    with CLEAN_DATA_PATH.open(newline="", encoding="utf-8") as csv_file:
+        records = list(csv.DictReader(csv_file))
+
+    for record in records:
+        record["quote_response_hours"] = float(record["quote_response_hours"])
+        record["supplier_compliance_flag"] = _parse_bool(str(record["supplier_compliance_flag"]))
+    return records
+
+
+def _percentage(part: int, total: int) -> float:
+    if total == 0:
+        return 0.0
+    return round((part / total) * 100, 1)
+
+
+def _anomaly_reasons(record: dict[str, object]) -> list[str]:
+    reasons: list[str] = []
+    if float(record["quote_response_hours"]) > 48:
+        reasons.append("Quote response over 48h")
+    if record["customs_status"] in {"delayed", "rejected"}:
+        reasons.append(f"Customs {record['customs_status']}")
+    if not bool(record["supplier_compliance_flag"]):
+        reasons.append("Supplier non-compliant")
+    return reasons
+
+
+def _week_start(value: str) -> str:
+    dt = datetime.fromisoformat(value)
+    start = dt.date().toordinal() - dt.weekday()
+    return datetime.fromordinal(start).date().isoformat()
+
+
+def build_dashboard_data(records: list[dict[str, object]]) -> dict[str, object]:
+    total = len(records)
+    quote_hours = [float(record["quote_response_hours"]) for record in records]
+    customs_counts = Counter(str(record["customs_status"]) for record in records)
+    mode_counts = Counter(str(record["transport_mode"]) for record in records)
+
+    fulfilment_by_mode: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "on_time": 0})
+    compliance_by_week: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "compliant": 0})
+    anomalies: list[dict[str, object]] = []
+
+    for record in records:
+        mode = str(record["transport_mode"])
+        fulfilment_by_mode[mode]["total"] += 1
+        if record["fulfilment_status"] == "on_time":
+            fulfilment_by_mode[mode]["on_time"] += 1
+
+        week = _week_start(str(record["rfq_sent_at"]))
+        compliance_by_week[week]["total"] += 1
+        if bool(record["supplier_compliance_flag"]):
+            compliance_by_week[week]["compliant"] += 1
+
+        reasons = _anomaly_reasons(record)
+        if reasons and len(anomalies) < 10:
+            anomalies.append(
+                {
+                    "shipment_id": record["shipment_id"],
+                    "origin_country": record["origin_country"],
+                    "destination_country": record["destination_country"],
+                    "transport_mode": record["transport_mode"],
+                    "quote_response_hours": round(float(record["quote_response_hours"]), 2),
+                    "customs_status": record["customs_status"],
+                    "supplier_id": record["supplier_id"],
+                    "reason": "; ".join(reasons),
+                }
+            )
+
+    fulfilment_rates = {
+        mode: _percentage(values["on_time"], values["total"])
+        for mode, values in sorted(fulfilment_by_mode.items())
+    }
+    compliance_trend = [
+        {
+            "week": week,
+            "rate": _percentage(values["compliant"], values["total"]),
+        }
+        for week, values in sorted(compliance_by_week.items())
+    ]
+
+    return {
+        "kpis": {
+            "total_shipments": total,
+            "avg_quote_response_hours": round(sum(quote_hours) / total, 2) if total else 0,
+            "pct_quotes_within_24h": _percentage(sum(value <= 24 for value in quote_hours), total),
+            "customs_clearance_rate": _percentage(customs_counts["cleared"], total),
+            "supplier_compliance_rate": _percentage(
+                sum(bool(record["supplier_compliance_flag"]) for record in records), total
+            ),
+            "fulfilment_on_time_rate": _percentage(
+                sum(record["fulfilment_status"] == "on_time" for record in records), total
+            ),
+        },
+        "quote_response_hours": quote_hours,
+        "customs_counts": dict(sorted(customs_counts.items())),
+        "mode_counts": dict(sorted(mode_counts.items())),
+        "fulfilment_rates_by_mode": fulfilment_rates,
+        "compliance_trend": compliance_trend,
+        "anomalies": anomalies,
+    }
+
+
+def build_index_html() -> str:
+    return """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -123,3 +247,21 @@
   </script>
 </body>
 </html>
+"""
+
+
+def main() -> None:
+    if not CLEAN_DATA_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing {CLEAN_DATA_PATH}. Run `python src/generate_data.py` and `python src/pipeline.py` first."
+        )
+
+    PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
+    dashboard_data = build_dashboard_data(_read_records())
+    (PUBLIC_DIR / "dashboard-data.json").write_text(json.dumps(dashboard_data, indent=2), encoding="utf-8")
+    (PUBLIC_DIR / "index.html").write_text(build_index_html(), encoding="utf-8")
+    print(f"Built Vercel static site in {PUBLIC_DIR}")
+
+
+if __name__ == "__main__":
+    main()
