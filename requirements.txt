@@ -1,0 +1,7 @@
+pandas
+faker
+python-dotenv
+plotly
+nbformat
+pytest
+ipykernel
